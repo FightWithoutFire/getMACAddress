@@ -7,11 +7,9 @@ import (
 	"github.com/sirupsen/logrus"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 )
 
 var log = logrus.New()
@@ -21,15 +19,10 @@ func main() {
 	flag.StringVar(&host, "M", "", "Get mac address")
 
 	flag.Parse()
-	// 初始化 代理
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	go listenHttps(ctx, host, client)
-	go listenHttp(ctx, host, client)
+	go listen(ctx, host)
 
 	// graceful terminate
 	sig := make(chan os.Signal, 1)
@@ -42,77 +35,111 @@ func main() {
 
 }
 
-func listenHttp(ctx context.Context, host string, client *http.Client) {
+func listen(ctx context.Context, host string) {
 
-	server := http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
-				_ = r.Body.Close()
-			}()
+	srvTCP, err := net.Listen("tcp", "127.0.0.1:8855")
 
-			_, _ = w.Write([]byte(fmt.Sprintf("http Computer B MAC is %s", getMacAddress(client, host))))
-		}),
-		IdleTimeout:       5 * time.Minute,
-		ReadHeaderTimeout: time.Minute,
-	}
-
-	srv, err := net.Listen("tcp", "127.0.0.1:8855")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	err = server.Serve(srv)
-	if err != nil {
-		log.Fatal(err)
-	}
+	go func() {
+		for {
+			conn, err := srvTCP.Accept()
+			if err != nil {
+				log.Fatal(err)
+			}
 
-	<-ctx.Done()
+			go func(from net.Conn) {
 
-}
+				defer func() {
+					_ = from.Close()
+				}()
 
-func getMacAddress(client *http.Client, host string) []byte {
-	resp, err := client.Get(fmt.Sprintf("http://%s", host))
-	if err != nil {
-		log.Error(err)
-		return nil
-	}
+				log.Printf("try client http to %s", host)
+				client, err := net.Dial("tcp", host)
+				log.Printf("success client https to %s", host)
 
-	defer func() {
-		_ = resp.Body.Close()
+				if err != nil {
+					return
+				}
+
+				defer func() {
+					_ = client.Close()
+				}()
+
+				err = proxy(client, from)
+
+				if err != nil && err != io.EOF {
+					log.Error(err)
+				}
+				log.Printf("close client https to %s", host)
+
+			}(conn)
+
+			//_, err = conn.Write([]byte("http Computer B MAC is " + string(getMacAddress(client, host))))
+		}
 	}()
-	all, err := io.ReadAll(resp.Body)
 
-	if err != nil {
-		log.Error(err)
-		return nil
-	}
-	return all
-}
+	srvTLS, err := net.Listen("tcp", "127.0.0.1:8854")
 
-func listenHttps(ctx context.Context, host string, client *http.Client) {
-
-	server := http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
-				_ = r.Body.Close()
-			}()
-
-			_, _ = w.Write([]byte(fmt.Sprintf("https Computer B MAC is %s", getMacAddress(client, host))))
-		}),
-		IdleTimeout:       5 * time.Minute,
-		ReadHeaderTimeout: time.Minute,
-	}
-
-	srvHttps, err := net.Listen("tcp", "127.0.0.1:8854")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	err = server.ServeTLS(srvHttps, "./domain.crt", "./domain.key")
-	if err != nil {
-		log.Fatal(err)
-	}
+	go func() {
+		for {
+			conn, err := srvTLS.Accept()
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			go func(from net.Conn) {
+
+				defer func() {
+					_ = from.Close()
+				}()
+
+				log.Printf("try client https to %s", host)
+				client, err := net.Dial("tcp", host)
+				log.Printf("success client https to %s", host)
+
+				if err != nil {
+					return
+				}
+
+				defer func() {
+					_ = client.Close()
+				}()
+
+				err = proxy(client, from)
+
+				if err != nil && err != io.EOF {
+					log.Error(err)
+
+				}
+				log.Printf("close client https to %s", host)
+
+			}(conn)
+
+			//_, err = conn.Write([]byte("http Computer B MAC is " + string(getMacAddress(client, host))))
+		}
+	}()
 
 	<-ctx.Done()
 
+}
+
+func proxy(w io.Writer, r io.Reader) error {
+	reader, isReader := w.(io.Reader)
+	writer, isWriter := r.(io.Writer)
+
+	if isWriter && isReader {
+		go func() {
+			_, _ = io.Copy(writer, reader)
+		}()
+	}
+
+	_, err := io.Copy(w, r)
+	return err
 }

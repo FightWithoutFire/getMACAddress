@@ -2,5 +2,5 @@
 
 ```bash
 go build
-./main -I ens33
+./cA -I ens33
 ```
